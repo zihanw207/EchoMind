@@ -1,0 +1,54 @@
+# Local credentials (only blank templates may be committed)
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+credentials*.json
+service-account*.json
+secrets/
+
+# Java edition and personal materials
+EchoMindJava/
+文档+简历/
+*简历*
+*面试*
+*技术亮点*
+/EchoMind/wiki/
+
+# Local data, dependencies, logs, and build output
+data/
+logs/
+*.log
+*.db
+*.sqlite
+*.sqlite3
+*.sqlite3-*
+*.rdb
+*.aof
+node_modules/
+dist/
+build/
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Editor, OS, and backup files
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+.Rhistory
+*.swp
+*.swo
+*.bak
+*~

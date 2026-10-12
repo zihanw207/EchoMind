@@ -1,0 +1,20 @@
+node_modules/
+.idea/
+.vscode/
+.DS_Store
+*.log
+.env
+
+# Never send local state or credentials into build contexts
+.git
+data/
+*.db
+*.sqlite*
+*.pem
+*.key
+*.p12
+*.pfx
+credentials*.json
+service-account*.json
+secrets/
+.env.*
