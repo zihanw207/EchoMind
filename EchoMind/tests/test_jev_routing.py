@@ -5,8 +5,8 @@ from unittest.mock import AsyncMock
 import httpx
 import pytest
 
+from agents import agent_orchestrator
 from agents.agent_orchestrator import AgentOrchestrator, AgentResponse, AgentStats, AgentType, Request
-from core.intent_recognizer import IntentCategory, IntentResult, UrgencyLevel
 
 
 TECHNICAL = AgentType.TECHNICAL
@@ -50,7 +50,6 @@ def set_noul_answers(orchestrator, technical, billing, handoff):
 ])
 def test_jev_routes_all_noul_combinations(orchestrator, technical, billing, handoff, expected):
     post = set_noul_answers(orchestrator, technical, billing, handoff)
-    orchestrator.recognize_intent = AsyncMock(side_effect=AssertionError("Unexpected legacy routing"))
     compose = AsyncMock(return_value=SimpleNamespace(content=[SimpleNamespace(type="text", text="已合并")]))
     orchestrator._composer._client = SimpleNamespace(messages=SimpleNamespace(create=compose))
 
@@ -75,6 +74,7 @@ def test_jev_routes_all_noul_combinations(orchestrator, technical, billing, hand
     assert set(payload["questions"]) == {"technical", "billing", "handoff"}
     assert all(question["type"] == "noul" for question in payload["questions"].values())
     assert result.agent_types == expected
+    assert result.routing_source == "jev"
     assert result.escalated is (expected == [ESCALATION])
     assert req.entities["error_code"] == ["401"]
     for agent_type, handler in handlers.items():
@@ -89,35 +89,63 @@ def test_jev_routes_all_noul_combinations(orchestrator, technical, billing, hand
         compose.assert_not_awaited()
 
 
-def test_malformed_jev_response_uses_legacy_routing(orchestrator):
-    set_noul_answers(orchestrator, 0.1, 0.1, "not a probability")
-    orchestrator.recognize_intent = AsyncMock(return_value=IntentResult(
-        intent=IntentCategory.HUMAN_HANDOFF,
-        confidence=0.95,
-        urgency=UrgencyLevel.HIGH,
-        intent_group="escalation",
-        entities={},
-        reasoning="",
-        latency_ms=0.0,
-    ))
+@pytest.mark.parametrize("failure", ["invalid_response", "http_error", "timeout"])
+def test_jev_failures_call_general_directly(orchestrator, monkeypatch, failure):
+    if failure == "invalid_response":
+        post = set_noul_answers(orchestrator, 0.9, 0.9, "not a probability")
+    elif failure == "http_error":
+        request = httpx.Request("POST", "https://api.typesafe.ai/v1/systemone")
+        post = AsyncMock(return_value=httpx.Response(503, request=request))
+    else:
+        async def slow_request(*args, **kwargs):
+            await asyncio.sleep(10)
+
+        monkeypatch.setattr(agent_orchestrator, "JEV_ROUTING_TIMEOUT_SECONDS", 0.01)
+        post = AsyncMock(side_effect=slow_request)
+    orchestrator._jev_router._client.post = post
+
+    general = AsyncMock(return_value=AgentResponse(GENERAL, "请问是登录还是账单问题？", True))
+    orchestrator._pool[GENERAL] = [SimpleNamespace(handle=general, stats=AgentStats())]
+    req = Request(
+        "登录报错 401，还被重复扣款", "u1", "c1",
+        history=[{"role": "user", "content": "我刚才在 App 操作"}],
+    )
 
     async def run():
         try:
-            return await orchestrator.run(Request("请转人工", "u1", "c1"))
+            return await orchestrator.run(req)
         finally:
             await orchestrator.close()
 
     result = asyncio.run(run())
-    orchestrator.recognize_intent.assert_awaited_once()
-    assert result.agent_types == [ESCALATION]
-    assert result.escalated is True
+    post.assert_awaited_once()
+    general.assert_awaited_once_with(req)
+    assert result.agent_types == [GENERAL]
+    assert result.response == "请问是登录还是账单问题？"
+    assert result.routing_source == "general_fallback"
+    assert ("超时" if failure == "timeout" else "失败") in result.routing_reason
+    assert req.intent_source_scores == {}
+    assert orchestrator.get_tool_trace(req.request_id)["routing_source"] == "general_fallback"
+
+
+def test_without_jev_key_calls_general_directly(monkeypatch):
+    monkeypatch.setenv("no_proxy", "*")
+    monkeypatch.delenv("TYPESAFE_API_KEY", raising=False)
+    orchestrator = AgentOrchestrator(api_key="test-key")
+    general = AsyncMock(return_value=AgentResponse(GENERAL, "请告诉我你想问什么。", True))
+    orchestrator._pool[GENERAL] = [SimpleNamespace(handle=general, stats=AgentStats())]
+
+    result = asyncio.run(orchestrator.run(Request("你好", "u1", "c1")))
+    general.assert_awaited_once()
+    assert result.agent_types == [GENERAL]
+    assert result.routing_source == "general_fallback"
+    assert "未配置 Jev 密钥" in result.routing_reason
 
 
 def test_chat_all_negative_calls_general_and_exposes_jev_scores(orchestrator, monkeypatch):
     from api import main
 
     post = set_noul_answers(orchestrator, 0.1, 0.2, 0.3)
-    orchestrator.recognize_intent = AsyncMock(side_effect=AssertionError("Unexpected legacy routing"))
     general = AsyncMock(return_value=AgentResponse(GENERAL, "你想咨询哪件事？", True))
     orchestrator._pool[GENERAL] = [SimpleNamespace(handle=general, stats=AgentStats())]
     memory = SimpleNamespace(
@@ -139,5 +167,6 @@ def test_chat_all_negative_calls_general_and_exposes_jev_scores(orchestrator, mo
     general.assert_awaited_once()
     assert response.response == "你想咨询哪件事？"
     assert response.agent_types == ["general"]
+    assert response.routing_source == "jev"
     assert response.intent_source_scores == {"jev_technical": 0.1, "jev_billing": 0.2, "jev_handoff": 0.3}
     assert memory.add_message.await_count == 2

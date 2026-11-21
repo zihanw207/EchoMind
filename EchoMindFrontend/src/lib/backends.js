@@ -119,6 +119,7 @@ function normalizeChatResponse(type, raw) {
     primaryAgent: raw.primary_agent || raw.primaryAgent || '',
     supportingAgents: raw.supporting_agents || raw.supportingAgents || [],
     routingReason: raw.routing_reason || raw.routingReason || '',
+    routingSource: raw.routing_source || raw.routingSource || '',
     routingConfidence: Number(raw.routing_confidence ?? raw.routingConfidence ?? 0),
     entities: raw.entities || {},
     intentConfidence: Number(raw.intent_confidence ?? raw.intentConfidence ?? 0),

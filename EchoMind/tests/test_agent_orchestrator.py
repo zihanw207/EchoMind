@@ -10,7 +10,6 @@ from agents.agent_orchestrator import (
     GeneralAgent,
     Request,
     ResponseComposer,
-    RoutingDecision,
     TechnicalAgent,
     build_shared_rag_tools,
 )
@@ -85,7 +84,7 @@ def test_escalation_agent_is_a_real_non_llm_handoff_node():
     assert client.calls == []
 
 
-def test_composer_fallback_preserves_primary_and_supporting_results():
+def test_composer_fallback_labels_replies_by_topic():
     composer = ResponseComposer(FakeClient(error=RuntimeError("provider down")), "test-model")
     req = make_request()
     responses = [
@@ -95,35 +94,10 @@ def test_composer_fallback_preserves_primary_and_supporting_results():
 
     content = asyncio.run(composer.compose(req, responses))
 
-    assert content.startswith("先排查 Token 是否过期。")
-    assert "补充说明" in content
+    assert "技术排查" in content
+    assert "账单核验" in content
+    assert "先排查 Token 是否过期。" in content
     assert "两笔扣款" in content
-
-
-def test_routing_decision_can_target_escalation_pool():
-    # Keep this assertion close to the public data contract used by the API.
-    decision = RoutingDecision(
-        primary_agent=AgentType.ESCALATION,
-        reason="critical request",
-        confidence=1.0,
-    )
-    assert decision.agent_types == [AgentType.ESCALATION]
-    assert not decision.multi_agent
-
-
-def test_composite_request_routes_explicit_billing_signal_as_supporting_agent():
-    orchestrator = AgentOrchestrator.__new__(AgentOrchestrator)
-    orchestrator._pool = {
-        AgentType.GENERAL: [object()],
-        AgentType.TECHNICAL: [object()],
-        AgentType.BILLING: [object()],
-    }
-
-    decision = orchestrator._route_decision(make_request())
-
-    assert decision.primary_agent is AgentType.TECHNICAL
-    assert decision.supporting_agents == [AgentType.BILLING]
-    assert decision.multi_agent is True
 
 
 def test_agent_tool_scopes_are_real_and_isolated():
@@ -278,11 +252,12 @@ def test_monitor_penalty_falls_back_to_general_agent():
         AgentType.BILLING: [billing],
     }
 
-    decision = orchestrator._route_decision(make_request(
-        message="登录报 401",
-        entities={"error_code": ["401"]},
-    ))
+    decision = orchestrator._route_jev(
+        make_request(message="登录报 401"),
+        {"technical": 0.9, "billing": 0.1, "handoff": 0.1},
+        {"technical"},
+    )
 
-    assert decision.primary_agent is AgentType.GENERAL
-    assert decision.supporting_agents == []
-    assert "monitor_fallback=[technical]" in decision.reason
+    assert decision.agent_types == [AgentType.GENERAL]
+    assert decision.source == "general_fallback"
+    assert "专业 Agent 不可用" in decision.reason

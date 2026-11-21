@@ -82,7 +82,7 @@ async def lifespan(app: FastAPI):
     cfg = _anthropic_cfg()
     logger.info(f"模型: {cfg['model']}  base_url: {cfg.get('base_url', '(官方)')}")
 
-    # 意图识别器（Orchestrator 内部也会创建，这里单独暴露给 Evaluator）
+    # 细粒度意图识别基准由评测器单独运行。
     recognizer = IntentRecognizer(
         api_key=cfg["api_key"],
         base_url=cfg.get("base_url"),
@@ -226,6 +226,7 @@ class ChatResponse(BaseModel):
     tools_used: List[str] = Field(default_factory=list)
     routing_reason: str = ""
     routing_confidence: float = 0.0
+    routing_source: str = ""
     escalated:   bool
     latency_ms:  float
     knowledge_used: bool = False
@@ -275,7 +276,7 @@ async def reload_skills():
 async def chat(req: ChatRequest):
     """
     主对话接口。完整流程：
-      记忆读取 → 意图识别 → Agent 路由 → 执行 → 记忆写入
+      记忆读取 → Jev 路由或通用兜底 → Agent 执行 → 记忆写入
     """
     if _orchestrator is None or _memory is None:
         raise HTTPException(503, "服务未就绪")
@@ -327,6 +328,7 @@ async def chat(req: ChatRequest):
         tools_used=result.tools_used,
         routing_reason=result.routing_reason,
         routing_confidence=result.routing_confidence,
+        routing_source=result.routing_source,
         escalated=result.escalated,
         latency_ms=round(result.latency_ms, 1),
         knowledge_used="search_knowledge_base" in result.tools_used,

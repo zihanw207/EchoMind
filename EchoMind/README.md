@@ -77,7 +77,7 @@ docker compose logs -f echomind
 流程是：
 
 ```text
-读取记忆 -> 意图识别 -> 知识检索 -> Agent 路由 -> 回复生成 -> 写回记忆
+读取记忆 -> Jev 路由或通用兜底 -> Agent 执行与按需检索 -> 回复生成 -> 写回记忆
 ```
 
 ### Jev 路由实验
@@ -91,7 +91,9 @@ docker compose logs -f echomind
 | 只有技术或账单达到阈值 | 派给对应的专业 Agent。 |
 | 三项均未达到阈值 | 调用 `GeneralAgent` 直接回答或追问。 |
 
-三个阈值默认是 `0.5`，可分别用 `ECHOMIND_JEV_TECHNICAL_THRESHOLD`、`ECHOMIND_JEV_BILLING_THRESHOLD`、`ECHOMIND_JEV_HANDOFF_THRESHOLD` 调整。可用 `ECHOMIND_JEV_MODEL` 指定模型版本。`/chat` 的 `intent_source_scores` 会列出三个 Jev 概率。未配置密钥或 Jev 请求失败时，服务使用原有意图路由。
+三个阈值默认是 `0.5`，可分别用 `ECHOMIND_JEV_TECHNICAL_THRESHOLD`、`ECHOMIND_JEV_BILLING_THRESHOLD`、`ECHOMIND_JEV_HANDOFF_THRESHOLD` 调整。可用 `ECHOMIND_JEV_MODEL` 指定模型版本。`/chat` 的 `intent_source_scores` 会列出有效的 Jev 概率。
+
+Jev 路由总时限为 5 秒。缺少密钥、超时、接口错误或返回无效响应时，请求直接交给 `GeneralAgent`。通用 Agent 会依据当前消息和历史直接回答或追问。`/chat` 用 `routing_source` 区分 Jev 给出的派发结果（`jev`）和通用兜底（`general_fallback`），并通过 `routing_reason` 说明原因。
 
 ### 知识库
 
@@ -132,9 +134,8 @@ data/                       持久化数据
 用户请求
   -> /chat
   -> MemoryManager 读取工作记忆、情景记忆、用户画像
-  -> IntentRecognizer 输出 intent / intent_group / urgency / entities
-  -> 按意图决定是否检索知识库
-  -> AgentOrchestrator 路由到 General / Technical / Billing / Escalation
+  -> Jev 一次判断技术、账单和转人工
+  -> AgentOrchestrator 派发任务或交给 GeneralAgent 兜底
   -> Skills 注入、工具调用、回复生成
   -> 写回 Redis 和 ChromaDB
   -> Monitor 采集在线指标

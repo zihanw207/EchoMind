@@ -373,15 +373,16 @@ class IntentRecognizer:
 
     # ── 实体提取 ──────────────────────────────────────────────────────────────
 
-    def extract_entities(self, message: str) -> Dict[str, List[str]]:
+    @staticmethod
+    def extract_entities(message: str) -> Dict[str, List[str]]:
         """用规则提取高价值实体，避免每次识别都额外调用 LLM。"""
-        message = self._clean_text(message)
+        message = IntentRecognizer._clean_text(message)
         return {
-            "order_id": self._unique(re.findall(r"(?:订单号?|order(?:_id)?|#)\s*[:：#]?\s*([A-Za-z0-9_-]{4,32})", message, re.I)),
+            "order_id": IntentRecognizer._unique(re.findall(r"(?:订单号?|order(?:_id)?|#)\s*[:：#]?\s*([A-Za-z0-9_-]{4,32})", message, re.I)),
             "product": [],
-            "date": self._unique(re.findall(r"(今天|明天|昨天|本周|这周|下周|\d{4}[-/.年]\d{1,2}[-/.月]\d{1,2}日?)", message)),
-            "amount": self._unique(re.findall(r"((?:¥|￥)\s*\d+(?:\.\d{1,2})?|\d+(?:\.\d{1,2})?\s*(?:元|块|rmb|cny|usd|美元))", message, re.I)),
-            "error_code": self._unique(
+            "date": IntentRecognizer._unique(re.findall(r"(今天|明天|昨天|本周|这周|下周|\d{4}[-/.年]\d{1,2}[-/.月]\d{1,2}日?)", message)),
+            "amount": IntentRecognizer._unique(re.findall(r"((?:¥|￥)\s*\d+(?:\.\d{1,2})?|\d+(?:\.\d{1,2})?\s*(?:元|块|rmb|cny|usd|美元))", message, re.I)),
+            "error_code": IntentRecognizer._unique(
                 re.findall(r"(?:error(?:_code)?|错误码|状态码|http)\s*[:：#]?\s*([45]\d{2})\b", message, re.I)
                 + re.findall(r"\b([45]\d{2})\b", message)
             ),
