@@ -80,6 +80,19 @@ docker compose logs -f echomind
 读取记忆 -> 意图识别 -> 知识检索 -> Agent 路由 -> 回复生成 -> 写回记忆
 ```
 
+### Jev 路由实验
+
+在用于启动服务的 `.env` 中填写 `TYPESAFE_API_KEY`。这个配置会把本轮消息和最多五条最近对话发送给 TypeSafe，在一次请求中判断技术、账单和转人工三项。`ANTHROPIC_API_KEY` 仍用于生成 Agent 回复和汇总结果。 [Jev API 文档](https://docs.typesafe.ai/primitives/noul)
+
+| Jev 判定 | 派发 |
+| --- | --- |
+| 转人工达到阈值 | 直接进入 `EscalationAgent`，生成交接信息并标记升级。实际人工队列或工单系统需要另行接入。 |
+| 技术和账单均达到阈值 | 两个 Agent 平级并行，汇总器按用户优先级和问题顺序组织回复。 |
+| 只有技术或账单达到阈值 | 派给对应的专业 Agent。 |
+| 三项均未达到阈值 | 调用 `GeneralAgent` 直接回答或追问。 |
+
+三个阈值默认是 `0.5`，可分别用 `ECHOMIND_JEV_TECHNICAL_THRESHOLD`、`ECHOMIND_JEV_BILLING_THRESHOLD`、`ECHOMIND_JEV_HANDOFF_THRESHOLD` 调整。可用 `ECHOMIND_JEV_MODEL` 指定模型版本。`/chat` 的 `intent_source_scores` 会列出三个 Jev 概率。未配置密钥或 Jev 请求失败时，服务使用原有意图路由。
+
 ### 知识库
 
 - `POST /search`

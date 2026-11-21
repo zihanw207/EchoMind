@@ -164,8 +164,11 @@
                   <strong>{{ lastResponse.latencyMs || '-' }}<small> ms</small></strong>
                 </div>
                 <dl class="detail-list">
-                  <div><dt>主 Agent</dt><dd>{{ lastResponse.primaryAgent || lastResponse.agentType || '-' }}</dd></div>
-                  <div><dt>意图</dt><dd>{{ lastResponse.intent || '-' }}</dd></div>
+                  <div v-if="lastResponse.intentGroup === 'technical_and_billing'">
+                    <dt>参与 Agent</dt><dd>{{ lastResponse.agentTypes.join(' / ') }}</dd>
+                  </div>
+                  <div v-else><dt>主 Agent</dt><dd>{{ lastResponse.primaryAgent || lastResponse.agentType || '-' }}</dd></div>
+                  <div><dt>意图</dt><dd>{{ lastResponse.intentGroup === 'technical_and_billing' ? '技术 + 账单' : lastResponse.intent || '-' }}</dd></div>
                   <div><dt>置信度</dt><dd>{{ formatPercent(lastResponse.routingConfidence) }}</dd></div>
                   <div><dt>知识库</dt><dd :class="lastResponse.knowledgeUsed ? 'success' : 'muted'">{{ lastResponse.knowledgeUsed ? '已使用' : '未使用' }}</dd></div>
                   <div><dt>转人工</dt><dd :class="lastResponse.escalated ? 'danger' : 'muted'">{{ lastResponse.escalated ? '是' : '否' }}</dd></div>

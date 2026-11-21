@@ -28,6 +28,7 @@ from dataclasses import dataclass, field, replace
 from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple
 
+import httpx
 from anthropic import AsyncAnthropic
 
 from agents.tools import (
@@ -39,6 +40,7 @@ from agents.tools import (
     technical_tools,
 )
 from core.intent_recognizer import IntentCategory, IntentRecognizer, UrgencyLevel
+from core.jev_router import JevRouter, ROUTING_QUESTIONS
 from core.llm_utils import extract_text_content
 
 logger = logging.getLogger(__name__)
@@ -151,6 +153,7 @@ class Request:
     urgency:     Optional[UrgencyLevel]   = None
     intent_confidence: float = 1.0
     request_id:  str = field(default_factory=lambda: str(uuid.uuid4())[:8])
+    intent_source_scores: Dict[str, float] = field(default_factory=dict)
 
 
 @dataclass
@@ -173,18 +176,21 @@ class OrchestratorResult:
 @dataclass
 class RoutingDecision:
     """一次请求的结构化路由决策。"""
-    primary_agent: AgentType
+    primary_agent: Optional[AgentType]
     supporting_agents: List[AgentType] = field(default_factory=list)
     reason: str = ""
     confidence: float = 0.0
+    peer_agents: List[AgentType] = field(default_factory=list)
 
     @property
     def agent_types(self) -> List[AgentType]:
+        if self.primary_agent is None:
+            return self.peer_agents
         return [self.primary_agent] + self.supporting_agents
 
     @property
     def multi_agent(self) -> bool:
-        return bool(self.supporting_agents)
+        return len(self.agent_types) > 1
 
 
 # ── 基础 Agent ────────────────────────────────────────────────────────────────
@@ -592,7 +598,9 @@ class ResponseComposer:
         self._model = model
         self._skill_manager = skill_manager
 
-    async def compose(self, req: Request, responses: List[AgentResponse]) -> str:
+    async def compose(
+        self, req: Request, responses: List[AgentResponse], *, peers: bool = False
+    ) -> str:
         successful = [response for response in responses if response.success and response.content.strip()]
         if not successful:
             return "抱歉，所有 Agent 均处理失败。"
@@ -603,12 +611,18 @@ class ResponseComposer:
             f"[{response.agent_type.value} Agent 输出]\n{response.content}"
             for response in successful
         )
+        ordering = (
+            "逐项覆盖用户仍需解决的问题。按用户明确指定的顺序组织；"
+            "否则先说明必要的前置步骤，独立问题按原问题出现的顺序组织。"
+            if peers else "以主 Agent 的结论为主，按用户问题优先级组织内容。"
+        )
+        primary = "" if peers else f"主 Agent：{successful[0].agent_type.value}\n"
         prompt = (
             "你是客服 Response Composer，负责把多个专业 Agent 的结果合并成一条最终回复。\n"
-            "要求：以主 Agent 的结论为主，按用户问题优先级组织内容；去掉重复和冲突表述；"
+            f"要求：{ordering}去掉重复和冲突表述；"
             "不能补造订单、退款、后台查询结果；如果结论冲突，明确说明需要核验；"
             "保留必要的排查步骤、核验字段和升级边界。只输出给用户看的中文回复，不要提及 Agent。\n\n"
-            f"主 Agent：{successful[0].agent_type.value}\n"
+            f"{primary}"
             f"用户问题：{req.message}\n"
             f"候选结果：\n{evidence}"
         )
@@ -628,6 +642,13 @@ class ResponseComposer:
                 return content
         except Exception as ex:
             logger.warning("Response Composer 失败，使用确定性合并: %s", ex)
+
+        if peers:
+            headings = {AgentType.TECHNICAL: "技术排查", AgentType.BILLING: "账单核验"}
+            return "\n\n".join(
+                f"{headings.get(response.agent_type, '客服建议')}：\n{response.content}"
+                for response in successful
+            )
 
         # 汇总节点不可用时保留主次标签，避免丢失某个专业 Agent 的结论。
         return "\n\n".join(
@@ -682,6 +703,17 @@ class AgentOrchestrator:
         client = AsyncAnthropic(**kwargs)
 
         self._intent_recognizer = IntentRecognizer(api_key=api_key, base_url=base_url, model=model)
+        jev_key = os.getenv("TYPESAFE_API_KEY", "").strip()
+        self._jev_router = None
+        if jev_key:
+            self._jev_router = JevRouter(
+                api_key=jev_key,
+                model=os.getenv("ECHOMIND_JEV_MODEL", "jev-latest").strip() or "jev-latest",
+                thresholds={
+                    question: _env_float(f"ECHOMIND_JEV_{question.upper()}_THRESHOLD", 0.5)
+                    for question in ROUTING_QUESTIONS
+                },
+            )
         self._skill_manager = skill_manager
         self._composer = ResponseComposer(client, model, skill_manager)
         self._shared_tools: Dict[str, AgentToolSpec] = {}
@@ -736,6 +768,10 @@ class AgentOrchestrator:
         """对外暴露意图识别，供 API 层先判断是否需要 RAG 等前置能力。"""
         return await self._intent_recognizer.recognize(message, history=history)
 
+    async def close(self) -> None:
+        if self._jev_router is not None:
+            await self._jev_router.close()
+
     def _record_tool_trace(self, result: OrchestratorResult) -> None:
         trace = {
             "request_id": result.request_id,
@@ -743,6 +779,7 @@ class AgentOrchestrator:
             "intent": result.intent.value if result.intent else None,
             "primary_agent": result.primary_agent.value if result.primary_agent else None,
             "supporting_agents": [agent.value for agent in result.supporting_agents],
+            "agent_types": [agent.value for agent in result.agent_types],
             "tools_used": list(result.tools_used),
             "tool_calls": list(result.tool_traces),
             "escalated": result.escalated,
@@ -770,16 +807,26 @@ class AgentOrchestrator:
           意图识别 → 路由选 Agent → 执行 → 检查升级 → 返回结果
         """
         t0 = time.monotonic()
+        decision = None
+        if self._jev_router is not None:
+            try:
+                scores, accepted = await self._jev_router.assess(req.message, req.history)
+            except (httpx.HTTPError, ValueError) as exc:
+                logger.warning("Jev 路由请求失败，使用原有意图路由: %s", type(exc).__name__)
+            else:
+                decision = self._route_jev(req, scores, accepted)
 
         # 1. 意图识别（如果调用方已识别则跳过）
-        if req.intent is None:
-            intent_result = await self._intent_recognizer.recognize(req.message, history=req.history)
+        if decision is None and req.intent is None:
+            intent_result = await self.recognize_intent(req.message, history=req.history)
             req.intent  = intent_result.intent
             req.intent_group = intent_result.intent_group
             req.urgency = intent_result.urgency
             req.intent_confidence = intent_result.confidence
+            req.intent_source_scores = intent_result.source_scores
+            req.entities = req.entities or intent_result.entities
 
-        if self._needs_clarification(req):
+        if decision is None and self._needs_clarification(req):
             result = OrchestratorResult(
                 request_id=req.request_id,
                 response="我还不能确定您要处理的是哪类问题。请补充一下是订单物流、退款账单、账户资料，还是技术故障？",
@@ -796,12 +843,13 @@ class AgentOrchestrator:
             return result
 
         # 复杂问题自动并行协作，例如同一句同时涉及登录故障和扣款/退款。
-        decision = self._route_decision(req)
+        if decision is None:
+            decision = self._route_decision(req)
         if decision.multi_agent:
             return await self.run_parallel(req, decision)
 
         # 2. 执行主 Agent（含降级）
-        response = await self._execute(req, decision.primary_agent)
+        response = await self._execute(req, decision.agent_types[0])
 
         # 4. 升级检查
         escalated = False
@@ -842,7 +890,7 @@ class AgentOrchestrator:
         responses = await asyncio.gather(*tasks, return_exceptions=True)
 
         valid_responses = [r for r in responses if isinstance(r, AgentResponse)]
-        combined = await self._composer.compose(req, valid_responses)
+        combined = await self._composer.compose(req, valid_responses, peers=bool(decision.peer_agents))
         escalated = any(isinstance(r, AgentResponse) and r.escalate for r in responses)
         tools_used = list(dict.fromkeys(
             tool_name
@@ -857,7 +905,7 @@ class AgentOrchestrator:
         result = OrchestratorResult(
             request_id=req.request_id,
             response=combined,
-            agent_type=decision.primary_agent,
+            agent_type=agent_types[0],
             intent=req.intent,
             escalated=escalated,
             latency_ms=(time.monotonic() - t0) * 1000,
@@ -876,6 +924,48 @@ class AgentOrchestrator:
         return result
 
     # ── 路由逻辑 ──────────────────────────────────────────────────────────────
+
+    def _route_jev(self, req: Request, scores: Dict[str, float], accepted: set[str]) -> RoutingDecision:
+        req.entities = req.entities or self._intent_recognizer.extract_entities(req.message)
+        req.intent_source_scores = {f"jev_{name}": score for name, score in scores.items()}
+        req.urgency = UrgencyLevel.LOW
+
+        if "handoff" in accepted:
+            req.intent = IntentCategory.HUMAN_HANDOFF
+            req.intent_group = "escalation"
+            req.urgency = UrgencyLevel.HIGH
+            req.intent_confidence = scores["handoff"]
+            return RoutingDecision(AgentType.ESCALATION, reason="Jev 判定请求转人工", confidence=scores["handoff"])
+
+        candidates = [
+            agent_type for agent_type in (AgentType.TECHNICAL, AgentType.BILLING)
+            if agent_type.value in accepted
+            and self._pool.get(agent_type)
+            and not self._monitor_degraded(agent_type)
+        ]
+        if not candidates:
+            req.intent = IntentCategory.OTHER
+            req.intent_group = "other"
+            req.intent_confidence = 0.0
+            reason = "Jev 命中的专业 Agent 不可用" if accepted else "Jev 三项均未达到阈值"
+            return RoutingDecision(AgentType.GENERAL, reason=reason)
+
+        if len(candidates) == 2:
+            req.intent = None
+            req.intent_group = "technical_and_billing"
+            req.intent_confidence = 0.0
+            return RoutingDecision(
+                primary_agent=None,
+                peer_agents=candidates,
+                reason="Jev 同时命中技术和账单，平级并行",
+                confidence=min(scores[agent_type.value] for agent_type in candidates),
+            )
+
+        selected = candidates[0]
+        req.intent = IntentCategory(selected.value)
+        req.intent_group = selected.value
+        req.intent_confidence = scores[selected.value]
+        return RoutingDecision(selected, reason=f"Jev 命中 {selected.value}", confidence=req.intent_confidence)
 
     def _route(self, intent: Optional[IntentCategory], urgency: Optional[UrgencyLevel]) -> AgentType:
         """

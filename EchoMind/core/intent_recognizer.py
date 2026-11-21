@@ -199,7 +199,7 @@ class IntentRecognizer:
             emb = {"intent": IntentCategory.OTHER, "confidence": 0.0}
 
         intent, confidence, source_scores = self._vote(llm, emb, pat)
-        entities = self._extract_entities(message)
+        entities = self.extract_entities(message)
         urgency  = self._urgency(message, intent)
 
         result = IntentResult(
@@ -373,7 +373,7 @@ class IntentRecognizer:
 
     # ── 实体提取 ──────────────────────────────────────────────────────────────
 
-    def _extract_entities(self, message: str) -> Dict[str, List[str]]:
+    def extract_entities(self, message: str) -> Dict[str, List[str]]:
         """用规则提取高价值实体，避免每次识别都额外调用 LLM。"""
         message = self._clean_text(message)
         return {

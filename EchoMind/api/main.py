@@ -180,12 +180,14 @@ async def lifespan(app: FastAPI):
     )
 
     logger.info("EchoMind 已就绪")
-    yield
-
-    await _monitor.stop()
-    if _memory is not None:
-        await _memory.close()
-    logger.info("EchoMind 已关闭")
+    try:
+        yield
+    finally:
+        await _orchestrator.close()
+        await _monitor.stop()
+        if _memory is not None:
+            await _memory.close()
+        logger.info("EchoMind 已关闭")
 
 
 # ── FastAPI ───────────────────────────────────────────────────────────────────
@@ -292,7 +294,6 @@ async def chat(req: ChatRequest):
         for m in mem_ctx.recent_messages[-5:]
     ] if mem_ctx.recent_messages else None
 
-    intent_result = await _orchestrator.recognize_intent(req.message, history=history)
     full_context = mem_ctx.to_prompt_text()
 
     orch_req = OrcReq(
@@ -301,11 +302,6 @@ async def chat(req: ChatRequest):
         conv_id=conv_id,
         context=full_context,
         history=history,
-        entities=intent_result.entities,
-        intent=intent_result.intent,
-        intent_group=intent_result.intent_group,
-        urgency=intent_result.urgency,
-        intent_confidence=intent_result.confidence,
     )
 
     # 3. 执行
@@ -323,10 +319,10 @@ async def chat(req: ChatRequest):
         request_id=result.request_id,
         response=result.response,
         intent=result.intent.value if result.intent else "other",
-        intent_group=intent_result.intent_group,
+        intent_group=orch_req.intent_group or "other",
         agent_type=result.agent_type.value,
         agent_types=[agent_type.value for agent_type in result.agent_types],
-        primary_agent=result.primary_agent.value if result.primary_agent else result.agent_type.value,
+        primary_agent=result.primary_agent.value if result.primary_agent else "",
         supporting_agents=[agent_type.value for agent_type in result.supporting_agents],
         tools_used=result.tools_used,
         routing_reason=result.routing_reason,
@@ -334,9 +330,9 @@ async def chat(req: ChatRequest):
         escalated=result.escalated,
         latency_ms=round(result.latency_ms, 1),
         knowledge_used="search_knowledge_base" in result.tools_used,
-        entities=intent_result.entities,
-        intent_confidence=round(intent_result.confidence, 4),
-        intent_source_scores=intent_result.source_scores,
+        entities=orch_req.entities,
+        intent_confidence=round(orch_req.intent_confidence, 4),
+        intent_source_scores=orch_req.intent_source_scores,
     )
 
 
@@ -607,6 +603,7 @@ async def _cli():
 
         print(f"\nEchoMind [{result.agent_type.value}]: {result.response}\n")
 
+    await orch.close()
     await mem.close()
 
 
